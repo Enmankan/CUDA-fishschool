@@ -48,20 +48,20 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 // constants
-const unsigned int window_width = 800;
-const unsigned int window_height = 500;
+const unsigned int window_width = 1200;
+const unsigned int window_height = 800;
 
-const float width = 8.0f;
-const float height = 5.0f;
+const float width = 12.0f;
+const float height = 8.0f;
 const float scale = 10.0f;
-__device__ const float d_width = 8.0f;
-__device__ const float d_height = 5.0f;
+__device__ const float d_width = 12.0f;
+__device__ const float d_height = 8.0f;
 __device__ const float d_scale = 10.0f;
 
 const unsigned int VERTS_IN_FISH = 3;
-const unsigned int FISH_COUNT = 1024;
+const unsigned int FISH_COUNT = 2048;
 
-const float avoidanceRange = 0.02f * scale;
+const float avoidanceRange = 0.08f * scale;
 const float alignmentRange = 0.04f * scale;
 const float attractionRange = 0.08f * scale;
 const float predatorRange = 0.1f * scale;
@@ -127,7 +127,10 @@ __host__ __device__ float2 operator/(float2 lhs, float rhs) { return lhs /= rhs;
 
 struct Shark {
 	float2 location;
-	Shark() : location({ width / 2.0f, height / 2.0f }) {}
+	Shark() {
+		location.x = width / 2.0f;
+		location.y = height / 2.0f;
+	}
 } shark;
 
 struct Fish {
@@ -137,10 +140,24 @@ struct Fish {
 	float maxforce;
 	float maxspeed;
 
-	Fish() : location({ width / 2.0f, height / 2.0f }), velocity(randomUnit()),
-		acceleration({ 0.0f, 0.0f }), maxspeed(3.0f), maxforce(0.03f) {}
-	Fish(float x, float y) : location({ x, y }), velocity(randomUnit()),
-		acceleration({ 0.0f, 0.0f }), maxspeed(3.0f), maxforce(0.03f) {}
+	Fish() : maxspeed(3.0f), maxforce(0.03f) {
+		location.x = width / 2.0f;
+		location.y = height / 2.0f;
+		float2 random = randomUnit();
+		velocity.x = random.x;
+		velocity.y = random.y;
+		acceleration.x = 0.0f;
+		acceleration.y = 0.0f;
+	}
+	Fish(float x, float y) : maxspeed(3.0f), maxforce(0.03f) {
+		location.x = x;
+		location.y = y;
+		float2 random = randomUnit();
+		velocity.x = random.x;
+		velocity.y = random.y;
+		acceleration.x = 0.0f;
+		acceleration.y = 0.0f;
+	}
 
 	void run(Fish *fish, Shark *shark, float dt) {
 		flock(fish, shark);
@@ -154,7 +171,7 @@ struct Fish {
 		float2 attraction(attract(fish));
 		float2 evade(predator(shark));
 
-		avoidance *= 1.5f;
+		avoidance *= 5.5f;
 		alignment *= 1.0f;
 		attraction *= 1.0f;
 		evade *= 0.05f;
@@ -261,7 +278,7 @@ struct Fish {
 
 	float2 predator(Shark *shark) {
 		float d = v_dist(location, shark->location);
-		if (d < predatorRange) {
+		if (d > 0 && d < predatorRange) {
 			float2 run = v_fromSub(shark->location, location);
 			run *= -1;
 			v_norm(run);
@@ -321,8 +338,8 @@ void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res);
 // rendering callbacks
 void display();
 void keyboard(unsigned char key, int x, int y);
-//void mouse(int button, int state, int x, int y);
-//void motion(int x, int y);
+void mouse(int button, int state, int x, int y);
+void motion(int x, int y);
 void passivemotion(int x, int y);
 void timerEvent(int value);
 
@@ -523,19 +540,19 @@ __global__ void run_kernel(GLfloat *pos, Fish *fish, float dt, float2 *accelerat
 
 	if (i > FISH_COUNT) return;
 
-	// flock_func(fish[i], fish, shark);
+//	flock_func(fish[i], fish, shark);
 	update_func(fish[i], dt, acceleration[i]);
 	borders_func(fish[i]);
 
     // write output vertex
-	draw_arraw(pos, i, fish[i].location.x, fish[i].location.y, 0.0f, HEADING(fish[i].velocity));
+	draw_arraw(pos, i, fish[i].location.x, fish[i].location.y, 1.0f, HEADING(fish[i].velocity));
 }
 
 
 void launch_kernel(GLfloat *pos, Fish *fish, Shark *shark, float dt, float2 *acceleration)
 {
     // execute the kernel
-	int blockSize = 1024;
+	int blockSize = 512;
 	dim3 threadsInBlock(blockSize);
 	dim3 blocksInGrid(FISH_COUNT / (float)blockSize);
 	run_avoid_kernel <<< blocksInGrid, threadsInBlock, 0, stream[0] >>> (fish, acceleration);
@@ -543,7 +560,10 @@ void launch_kernel(GLfloat *pos, Fish *fish, Shark *shark, float dt, float2 *acc
 	run_attract_kernel <<< blocksInGrid, threadsInBlock, 0, stream[2] >> > (fish, acceleration);
 	run_predator_kernel <<< blocksInGrid, threadsInBlock, 0, stream[3] >> > (fish, shark, acceleration);
 	checkCudaErrors(cudaDeviceSynchronize());
-	run_kernel <<< blocksInGrid, threadsInBlock >> >(pos, fish, dt, acceleration);
+	run_kernel <<< blocksInGrid, threadsInBlock >>>(pos, fish, dt, acceleration);
+	cudaError res = cudaGetLastError();
+	if ( cudaSuccess != res )
+	    printf( "Error: %s!\n", cudaGetErrorName(res));
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -667,7 +687,7 @@ bool initGL(int *argc, char **argv)
 	glutCreateWindow("Cuda GL Interop (VBO)");
 	glutDisplayFunc(display);
 	glutKeyboardFunc(keyboard);
-	//glutMotionFunc(motion);
+	glutMotionFunc(motion);
 	glutPassiveMotionFunc(passivemotion);
 	glutTimerFunc(REFRESH_DELAY, timerEvent, 0);
 
@@ -691,7 +711,7 @@ bool initGL(int *argc, char **argv)
 	// projection
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
-	//    gluPerspective(60.0, (GLfloat)window_width / (GLfloat) window_height, 0.1, 10.0);
+	//gluPerspective(60.0, (GLfloat)window_width / (GLfloat) window_height, 0.1, 10.0);
 	glOrtho(0.0, width, 0.0, height, 0.1, 10.0);
 
 	SDK_CHECK_ERROR_GL();
@@ -731,8 +751,8 @@ bool run(int argc, char **argv/*, char *ref_file*/)
 	// register callbacks
 	glutDisplayFunc(display);
 	glutKeyboardFunc(keyboard);
-	//glutMouseFunc(mouse);
-	//glutMotionFunc(motion);
+	glutMouseFunc(mouse);
+	glutMotionFunc(motion);
 	glutPassiveMotionFunc(passivemotion);
 #if defined (__APPLE__) || defined(MACOSX)
 	atexit(cleanup);
@@ -940,40 +960,40 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
 ////////////////////////////////////////////////////////////////////////////////
 //! Mouse event handlers
 ////////////////////////////////////////////////////////////////////////////////
-//void mouse(int button, int state, int x, int y)
-//{
-//	if (state == GLUT_DOWN)
-//	{
-//		mouse_buttons |= 1 << button;
-//	}
-//	else if (state == GLUT_UP)
-//	{
-//		mouse_buttons = 0;
-//	}
-//
-//	mouse_old_x = x;
-//	mouse_old_y = y;
-//}
-//
-//void motion(int x, int y)
-//{
-//	float dx, dy;
-//	dx = (float)(x - mouse_old_x);
-//	dy = (float)(y - mouse_old_y);
-//
-//	if (mouse_buttons & 1)
-//	{
-//		rotate_x += dy * 0.2f;
-//		rotate_y += dx * 0.2f;
-//	}
-//	else if (mouse_buttons & 4)
-//	{
-//		translate_z += dy * 0.01f;
-//	}
-//
-//	mouse_old_x = x;
-//	mouse_old_y = y;
-//}
+void mouse(int button, int state, int x, int y)
+{
+	if (state == GLUT_DOWN)
+	{
+		mouse_buttons |= 1 << button;
+	}
+	else if (state == GLUT_UP)
+	{
+		mouse_buttons = 0;
+	}
+
+	mouse_old_x = x;
+	mouse_old_y = y;
+}
+
+void motion(int x, int y)
+{
+	float dx, dy;
+	dx = (float)(x - mouse_old_x);
+	dy = (float)(y - mouse_old_y);
+
+	if (mouse_buttons & 1)
+	{
+		rotate_x += dy * 0.2f;
+		rotate_y += dx * 0.2f;
+	}
+	else if (mouse_buttons & 4)
+	{
+		translate_z += dy * 0.01f;
+	}
+
+	mouse_old_x = x;
+	mouse_old_y = y;
+}
 
 void passivemotion(int x, int y)
 {
