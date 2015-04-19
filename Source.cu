@@ -556,9 +556,9 @@ void launch_kernel(GLfloat *pos, Fish *fish, Shark *shark, float dt, float2 *acc
 	dim3 threadsInBlock(blockSize);
 	dim3 blocksInGrid(FISH_COUNT / (float)blockSize);
 	run_avoid_kernel <<< blocksInGrid, threadsInBlock, 0, stream[0] >>> (fish, acceleration);
-	run_align_kernel <<< blocksInGrid, threadsInBlock, 0, stream[1] >> > (fish, acceleration);
-	run_attract_kernel <<< blocksInGrid, threadsInBlock, 0, stream[2] >> > (fish, acceleration);
-	run_predator_kernel <<< blocksInGrid, threadsInBlock, 0, stream[3] >> > (fish, shark, acceleration);
+	run_align_kernel <<< blocksInGrid, threadsInBlock, 0, stream[1] >>> (fish, acceleration);
+	run_attract_kernel <<< blocksInGrid, threadsInBlock, 0, stream[2] >>> (fish, acceleration);
+	run_predator_kernel <<< blocksInGrid, threadsInBlock, 0, stream[3] >>> (fish, shark, acceleration);
 	checkCudaErrors(cudaDeviceSynchronize());
 	run_kernel <<< blocksInGrid, threadsInBlock >>>(pos, fish, dt, acceleration);
 	cudaError res = cudaGetLastError();
