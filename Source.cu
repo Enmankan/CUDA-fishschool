@@ -1,8 +1,11 @@
-// includes, system
+////////////////////////////////////////////////////////////////////////////////
+// includes & defines
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <ctime>
 
 #include "device_launch_parameters.h"
 
@@ -42,261 +45,142 @@
 #define THRESHOLD		0.30f
 #define REFRESH_DELAY	10 //ms
 #define EPS		0.0001f
+
+#ifndef M_PI
 #define M_PI	3.14159265358979323846	/* pi */
+#endif
 
 #define HEADING(v) (atan2(v.y, v.x))
+#define MAX(a,b) ((a > b) ? a : b)
+
+#define CUDA_ERROR_CHECK
+#define CudaCheckError() __cudaCheckError( __FILE__, __LINE__ )
+inline void __cudaCheckError(const char *file, const int line)
+{
+#ifdef CUDA_ERROR_CHECK
+	cudaError err = cudaGetLastError();
+	if (cudaSuccess != err)
+	{
+		fprintf(stderr, "cudaCheckError() failed at %s:%i : %s\n", file, line, cudaGetErrorString(err));
+		DEVICE_RESET
+		// Make sure we call CUDA Device Reset before exiting
+		exit(EXIT_FAILURE);
+	}
+#endif
+	return;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // constants
-const unsigned int window_width = 1200;
-const unsigned int window_height = 800;
 
-const float width = 12.0f;
-const float height = 8.0f;
-const float scale = 10.0f;
-__device__ const float d_width = 12.0f;
-__device__ const float d_height = 8.0f;
-__device__ const float d_scale = 10.0f;
+#define RUN_CUDA false
 
-const unsigned int VERTS_IN_FISH = 3;
-const unsigned int FISH_COUNT = 2048;
+const char *sProgramName = "CUDA fish school";
 
-const float avoidanceRange = 0.08f * scale;
-const float alignmentRange = 0.04f * scale;
-const float attractionRange = 0.08f * scale;
-const float predatorRange = 0.1f * scale;
-__device__ const float d_avoidanceRange = 0.02f * 10.0f;
-__device__ const float d_alignmentRange = 0.04f * 10.0f;
-__device__ const float d_attractionRange = 0.08f * 10.0f;
-__device__ const float d_predatorRange = 0.1f * 10.0f;
-//const float max_speed = 0.3f * scale;
+#define FISH_COUNT (16384)
+// 16384 // 8192 // 4096
+#define H_SEGMENTS (128)
+#define V_SEGMENTS (64)
+#define VERTS_IN_FISH (3)
 
-//struct Vector2 {
-//	float x;
-//	float y;
-//	Vector2(float x, float y) : x(x), y(y) {}
-//	Vector2(Vector2 const& v) : x(v.x), y(v.y) {}
-//	Vector2& operator+=(const Vector2& rhs) { x += rhs.x; y += rhs.y; return *this; }
-//	Vector2& operator-=(const Vector2& rhs) { x -= rhs.x; y -= rhs.y; return *this; }
-//	Vector2& operator*=(float rhs) { x *= rhs; y *= rhs; return *this; }
-//	Vector2& operator/=(float rhs) { x /= rhs; y /= rhs; return *this; }
-//	static Vector2 randomUnit() { float angle = 2 * M_PI * (rand() % 360) / 360; return Vector2(cos(angle), sin(angle)); }
-//	Vector2& limit(float max) { if (mag() > max) setMag(max); return *this; }
-//	Vector2& normalize() { float m = mag(); x /= m; y /= m; return *this; }
-//	Vector2& setMag(float m) { normalize(); x *= m; y *= m; return *this; }
-//	Vector2& add(Vector2& rhs) { *this += rhs; return *this; }
-//	Vector2& sub(Vector2& rhs) { *this -= rhs; return *this; }
-//	static Vector2 sub(Vector2& lhs, Vector2& rhs) { Vector2 ret(lhs); ret -= rhs; return ret; }
-//	Vector2& mult(float rhs) { return *this *= rhs; }
-//	Vector2& div(float rhs) { return *this /= rhs; }
-//	float mag() { return sqrt(x*x + y*y); }
-//	float heading() { return atan2(y, x); }
-//	static float dist(Vector2& a, Vector2& b) { return sqrt((a.x - b.x)*(a.x - b.x) + (a.y - b.y)*(a.y - b.y)); }
-//	static float fi(Vector2& a, Vector2& b) { return atan2((b.y - a.y), (b.x - a.x)); }
-//};
-//Vector2 operator*(Vector2 lhs, float rhs) { return lhs *= rhs; }
-//Vector2 operator/(Vector2 lhs, float rhs) { return lhs /= rhs; }
-//std::ostream& operator<<(std::ostream& os, const Vector2& obj)
-//{
-//	os << "(" << obj.x << ", " << obj.y << ")";
-//	return os;
-//}
+unsigned int window_width = 900;
+unsigned int window_height = 600;
 
-float2 randomUnit() { float angle = 2 * M_PI * (rand() % 360) / 360; return{ cosf(angle), sinf(angle) }; }
+struct constants {
+	float width;
+	float height;
+	float scale;
 
-__host__ __device__ float2 operator+(float2 a, float2 b) { return{ a.x + b.x, a.y + b.y }; }
+	float peakHeight;
+	float trunkWidth;
+
+	float seg_width;
+	float seg_height;
+
+	float maxforce;
+	float maxspeed;
+
+	float avoidanceRange;
+	float alignmentRange;
+	float attractionRange;
+	float predatorRange;
+	float avoidWeight;
+	float alignWeight;
+	float attractWeight;
+	float predatorWeight;
+} h_consts;
+void set_consts() {
+	h_consts.width = 36.0f;
+	h_consts.height = 24.0f;
+	h_consts.scale = 10.0f;
+
+	h_consts.peakHeight = 0.01f * h_consts.scale;
+	h_consts.trunkWidth = 0.002f * h_consts.scale;
+
+	h_consts.seg_width = h_consts.width / (float)H_SEGMENTS;
+	h_consts.seg_height = h_consts.height / (float)V_SEGMENTS;
+
+	h_consts.maxforce = 0.06f;
+	h_consts.maxspeed = 6.0f;
+
+	h_consts.avoidanceRange = 0.02f * h_consts.scale;
+	h_consts.alignmentRange = 0.03f * h_consts.scale;
+	h_consts.attractionRange = 0.06f * h_consts.scale;
+	h_consts.predatorRange = 0.1f * h_consts.scale;
+	h_consts.avoidWeight = 5.5f;
+	h_consts.alignWeight = 1.0f;
+	h_consts.attractWeight = 1.0f;
+	h_consts.predatorWeight = 0.1f;
+}
+__constant__ constants d_consts;
+
+////////////////////////////////////////////////////////////////////////////////
+// vector functions
+
+float2 randomUnit() { float angle = (float) (2 * M_PI * (rand() / (float) RAND_MAX)); return make_float2(cosf(angle), sinf(angle)); }
+float2 randomSquare() { return make_float2(rand() / (float) RAND_MAX, rand() / (float) RAND_MAX); }
+
+__host__ __device__ float2 operator+(float2 a, float2 b) { return make_float2(a.x + b.x, a.y + b.y); }
 __host__ __device__ float2& operator+=(float2& lhs, const float2& rhs) { lhs.x += rhs.x; lhs.y += rhs.y; return lhs; }
 __host__ __device__ float2& operator-=(float2& lhs, const float2& rhs) { lhs.x -= rhs.x; lhs.y -= rhs.y; return lhs; }
 __host__ __device__ float2& operator*=(float2& lhs, float rhs) { lhs.x *= rhs; lhs.y *= rhs; return lhs; }
 __host__ __device__ float2& operator/=(float2& lhs, float rhs) { lhs.x /= rhs; lhs.y /= rhs; return lhs; }
-__host__ __device__ float2& v_add(float2& lhs, float2& rhs) { lhs += rhs; return lhs; }
-__host__ __device__ float2& v_sub(float2& lhs, float2& rhs) { lhs -= rhs; return lhs; }
-__host__ __device__ float2& v_mul(float2& lhs, float rhs) { return lhs *= rhs; }
-__host__ __device__ float2& v_div(float2& lhs, float rhs) { return lhs /= rhs; }
-__host__ __device__ float v_mag(float2& lhs) { return sqrt(lhs.x*lhs.x + lhs.y*lhs.y); }
-__host__ __device__ float2& v_norm(float2& lhs) { float m = v_mag(lhs); lhs.x /= m; lhs.y /= m; return lhs; }
-__host__ __device__ float2& v_setMag(float2& lhs, float m) { v_norm(lhs); lhs.x *= m; lhs.y *= m; return lhs; }
-__host__ __device__ float2& v_limit(float2& lhs, float max) { if (v_mag(lhs) > max) v_setMag(lhs, max); return lhs; }
-__host__ __device__ float v_heading(float2& lhs) { return atan2(lhs.y, lhs.x); }
-__host__ __device__ float2 v_randomUnit() { float angle = 2 * M_PI * (rand() % 360) / 360; return{ cosf(angle), sinf(angle) }; }
-__host__ __device__ float2 v_fromSub(float2& lhs, float2& rhs) { float2 ret(lhs); ret -= rhs; return ret; }
-__host__ __device__ float v_dist(float2& a, float2& b) { return sqrt((a.x - b.x)*(a.x - b.x) + (a.y - b.y)*(a.y - b.y)); }
-__host__ __device__ float v_fi(float2& a, float2& b) { return atan2((b.y - a.y), (b.x - a.x)); }
+__host__ __device__ inline float2& v_add(float2& lhs, float2& rhs) { lhs += rhs; return lhs; }
+__host__ __device__ inline float2& v_sub(float2& lhs, float2& rhs) { lhs -= rhs; return lhs; }
+__host__ __device__ inline float2& v_mul(float2& lhs, float rhs) { return lhs *= rhs; }
+__host__ __device__ inline float2& v_div(float2& lhs, float rhs) { return lhs /= rhs; }
+__host__ __device__ inline float v_mag(float2& lhs) { return sqrtf(lhs.x*lhs.x + lhs.y*lhs.y); }
+__host__ __device__ inline float2& v_norm(float2& lhs) { float m = v_mag(lhs); lhs.x /= m; lhs.y /= m; return lhs; }
+__host__ __device__ inline float2& v_setMag(float2& lhs, float m) { v_norm(lhs); lhs.x *= m; lhs.y *= m; return lhs; }
+__host__ __device__ inline float2& v_limit(float2& lhs, float max) { if (v_mag(lhs) > max) v_setMag(lhs, max); return lhs; }
+__host__ __device__ inline float v_heading(float2& lhs) { return atan2f(lhs.y, lhs.x); }
+__host__ __device__ inline float2 v_fromSub(float2& lhs, float2& rhs) { float2 ret(lhs); ret -= rhs; return ret; }
+__host__ __device__ inline float v_dist(float2& a, float2& b) { return sqrtf((a.x - b.x)*(a.x - b.x) + (a.y - b.y)*(a.y - b.y)); }
+__host__ __device__ inline float v_fi(float2& a, float2& b) { return atan2f((b.y - a.y), (b.x - a.x)); }
 __host__ __device__ float2 operator*(float2 lhs, float rhs) { return lhs *= rhs; }
 __host__ __device__ float2 operator/(float2 lhs, float rhs) { return lhs /= rhs; }
 
-struct Shark {
-	float2 location;
-	Shark() {
-		location.x = width / 2.0f;
-		location.y = height / 2.0f;
-	}
-} shark;
+////////////////////////////////////////////////////////////////////////////////
+// variables
 
-struct Fish {
-	float2 location;
-	float2 velocity;
-	float2 acceleration;
-	float maxforce;
-	float maxspeed;
+float2 shark = { h_consts.width / 2.0f, h_consts.height / 2.0f };
 
-	Fish() : maxspeed(3.0f), maxforce(0.03f) {
-		location.x = width / 2.0f;
-		location.y = height / 2.0f;
-		float2 random = randomUnit();
-		velocity.x = random.x;
-		velocity.y = random.y;
-		acceleration.x = 0.0f;
-		acceleration.y = 0.0f;
-	}
-	Fish(float x, float y) : maxspeed(3.0f), maxforce(0.03f) {
-		location.x = x;
-		location.y = y;
-		float2 random = randomUnit();
-		velocity.x = random.x;
-		velocity.y = random.y;
-		acceleration.x = 0.0f;
-		acceleration.y = 0.0f;
-	}
+float2 fish_loc[FISH_COUNT];
+float2 fish_vel[FISH_COUNT];
+float2 fish_accel[FISH_COUNT];
 
-	void run(Fish *fish, Shark *shark, float dt) {
-		flock(fish, shark);
-		update(dt);
-		borders();
-	}
+int fish_seg[FISH_COUNT];
+int seg_start[H_SEGMENTS * V_SEGMENTS];
+int seg_count[H_SEGMENTS * V_SEGMENTS];
 
-	void flock(Fish *fish, Shark *shark) {
-		float2 avoidance(avoid(fish));
-		float2 alignment(align(fish));
-		float2 attraction(attract(fish));
-		float2 evade(predator(shark));
+float2 *d_fish_loc = NULL;
+float2 *d_fish_vel = NULL;
+float2 *d_fish_accel = NULL;
+float2 *d_shark = NULL;
 
-		avoidance *= 5.5f;
-		alignment *= 1.0f;
-		attraction *= 1.0f;
-		evade *= 0.05f;
-
-		acceleration += avoidance;
-		acceleration += alignment;
-		acceleration += attraction;
-		acceleration += evade;
-	}
-
-	void update(float dt) {
-		velocity += acceleration;
-		v_limit(velocity, maxspeed);
-		location += velocity * dt;
-		acceleration *= 0;
-	}
-
-	float2 seek(float2 target) {
-		// A vector pointing from the location to the target
-		float2 desired(v_fromSub(target, location));
-		v_setMag(desired, maxspeed);
-
-		float2 steer = v_fromSub(desired, velocity);
-		v_limit(steer, maxforce);
-		return steer;
-	}
-
-	// Wrap-around
-	void borders() {
-		if (location.x < 0.0f) location.x = width;
-		if (location.y < 0.0f) location.y = height;
-		if (location.x > width) location.x = 0.0f;
-		if (location.y > height) location.y = 0.0f;
-	}
-
-	float2 avoid(Fish *fish) {
-		float2 steer = { 0.0f, 0.0f };
-		int count = 0;
-		for (int i = 0; i < FISH_COUNT; ++i) {
-			float d = v_dist(location, fish[i].location);
-			if ((d > 0) && (d < avoidanceRange)) {
-				// Calculate vector pointing away from neighbor
-				float2 diff(v_fromSub(location, fish[i].location));
-				v_norm(diff);
-				v_div(diff, d);		// Weight by distance
-				v_add(steer, diff);
-				count++;
-			}
-		}
-		// Average
-		if (count > 0) {
-			v_div(steer, (float)count);
-		}
-
-		if (v_mag(steer) > 0) {
-			v_setMag(steer, maxspeed);
-			v_sub(steer, velocity);
-			v_limit(steer, maxforce);
-		}
-		return steer;
-	}
-
-	// Align == avarage velocity
-	float2 align(Fish *fish) {
-		float2 sum = { 0.0f, 0.0f };
-		int count = 0;
-		for (int i = 0; i < FISH_COUNT; ++i) {
-			float d = v_dist(location, fish[i].location);
-			if ((d > 0) && (d < alignmentRange)) {
-				v_add(sum, fish[i].velocity);
-				count++;
-			}
-		}
-		if (count > 0) {
-			v_div(sum, (float)count);
-			v_setMag(sum, maxspeed);
-
-			float2 steer = v_fromSub(sum, velocity);
-			v_limit(steer, maxforce);
-			return steer;
-		}
-		return { 0.0f, 0.0f };
-	}
-
-	// Attraction == avarage location
-	float2 attract(Fish *fish) {
-		float2 sum = { 0.0f, 0.0f };
-		int count = 0;
-		for (int i = 0; i < FISH_COUNT; ++i) {
-			float d = v_dist(location, fish[i].location);
-			if ((d > 0) && (d < attractionRange)) {
-				v_add(sum, fish[i].location);
-				count++;
-			}
-		}
-		if (count > 0) {
-			v_div(sum, count);
-			return seek(sum);
-		}
-		else {
-			return { 0.0f, 0.0f };
-		}
-	}
-
-	float2 predator(Shark *shark) {
-		float d = v_dist(location, shark->location);
-		if (d > 0 && d < predatorRange) {
-			float2 run = v_fromSub(shark->location, location);
-			run *= -1;
-			v_norm(run);
-			v_div(run, d);
-			return run;
-		}
-		return { 0.0f, 0.0f };
-	}
-} fish[FISH_COUNT];
-//std::ostream& operator<<(std::ostream& os, const Fish& obj)
-//{
-//	os << "Fish: loc " << obj.location << " vel " << obj.velocity;
-//	return os;
-//}
-
-Fish *d_fish = NULL;
-Shark *d_shark = NULL;
-float2 *d_acceleration = NULL;
+int *d_seg = NULL;
+int *d_seg_start = NULL;
+int *d_seg_count = NULL;
 
 // vbo variables
 GLuint vbo;
@@ -314,7 +198,6 @@ StopWatchInterface *timer = NULL;
 // Auto-Verification Code
 int fpsCount = 0;        // FPS count for averaging
 int fpsLimit = 1;        // FPS limit for sampling
-int g_Index = 0;
 float avgFPS = 0.0f;
 unsigned int frameCount = 0;
 unsigned int g_TotalErrors = 0;
@@ -322,13 +205,13 @@ unsigned int g_TotalErrors = 0;
 int *pArgc = NULL;
 char **pArgv = NULL;
 
-#define MAX(a,b) ((a > b) ? a : b)
+cudaStream_t stream[4];
 
 ////////////////////////////////////////////////////////////////////////////////
-// declaration, forward
+// forward declarations
+
 bool run(int argc, char **argv);
 void cleanup();
-void initState();
 
 // GL functionality
 bool initGL(int *argc, char **argv);
@@ -337,26 +220,23 @@ void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res);
 
 // rendering callbacks
 void display();
+void reshape(int width, int height);
 void keyboard(unsigned char key, int x, int y);
 void mouse(int button, int state, int x, int y);
 void motion(int x, int y);
 void passivemotion(int x, int y);
 void timerEvent(int value);
 
-// Cuda functionality
-void runCuda(struct cudaGraphicsResource **vbo_resource, struct Fish *d_fish, struct Shark *d_shark);
+// simulation
+void runCuda();
 void runCPU();
 
 void drawCircle(float cx, float cy, float r, int num_segments);
-void drawArraw(GLfloat *array, int index, float u, float w, float v, float heading);
-
-const char *sSDKsample = "CUDA fish school";
-
-cudaStream_t stream[4];
+void randFish(int i);
+void sortFish(constants &consts);
 
 ///////////////////////////////////////////////////////////////////////////////
-//! Simple kernel to modify vertex positions
-//! @param data  data in global memory
+//! Kernel functions
 ///////////////////////////////////////////////////////////////////////////////
 #define VERT_ARRAY_POINT(array, index, x, y, z) ( \
 	array[4 * (index)] = x, \
@@ -374,45 +254,54 @@ cudaStream_t stream[4];
 #define ROTATE_POINT_X(x, y, cx, cy, angle) ((x - cx) * cosf(angle) - (y - cy) * sinf(angle) + cx)
 #define ROTATE_POINT_Y(x, y, cx, cy, angle) ((x - cx) * sinf(angle) + (y - cy) * cosf(angle) + cy)
 
-__device__ void draw_arraw(GLfloat *array, int index, float u, float w, float v, float heading)
+__host__ __device__ inline int getVSeg(float y, constants &consts) { return MAX(MIN((int)(y / consts.seg_height), V_SEGMENTS - 1), 0); }
+__host__ __device__ inline int getHSeg(float x, constants &consts) { return MAX(MIN((int)(x / consts.seg_width), H_SEGMENTS - 1), 0); }
+__host__ __device__ inline int getSeg(float2 &location, constants &consts) { return getVSeg(location.y, consts) * H_SEGMENTS + getHSeg(location.x, consts); }
+__host__ __device__ inline int getIndexFrom(int h, int v, int *seg_start) { return seg_start[v * H_SEGMENTS + h]; }
+__host__ __device__ inline int getIndexTo(int h, int v, int *seg_start, int *seg_count) { int seg = v * H_SEGMENTS + h; return seg_start[seg] + seg_count[seg]; }
+
+__host__ __device__ void draw_arraw(GLfloat *array, int index, float u, float w, float v, float heading, constants &consts)
 {
-	float peakHeight = 0.02f * d_scale;
-	float trunkWidth = 0.005f * d_scale;
 	VERT_ARRAY_TRIANGLE(array, index,
-		ROTATE_POINT_X(u, w - trunkWidth, u, w, heading),
-		ROTATE_POINT_Y(u, w - trunkWidth, u, w, heading),
+		ROTATE_POINT_X(u, w - consts.trunkWidth, u, w, heading),
+		ROTATE_POINT_Y(u, w - consts.trunkWidth, u, w, heading),
 		v,
-		ROTATE_POINT_X(u + peakHeight, w, u, w, heading),
-		ROTATE_POINT_Y(u + peakHeight, w, u, w, heading),
+		ROTATE_POINT_X(u + consts.peakHeight, w, u, w, heading),
+		ROTATE_POINT_Y(u + consts.peakHeight, w, u, w, heading),
 		v,
-		ROTATE_POINT_X(u, w + trunkWidth, u, w, heading),
-		ROTATE_POINT_Y(u, w + trunkWidth, u, w, heading),
+		ROTATE_POINT_X(u, w + consts.trunkWidth, u, w, heading),
+		ROTATE_POINT_Y(u, w + consts.trunkWidth, u, w, heading),
 		v
 	);
 }
 
-__device__ float2 seek_func(Fish &subject, float2 target) {
+__host__ __device__ float2 seek_func(float2 &location, float2 &velocity, float2 target, constants &consts)
+{
 	// A vector pointing from the location to the target
-	float2 desired(v_fromSub(target, subject.location));
-	v_setMag(desired, subject.maxspeed);
+	float2 desired(v_fromSub(target, location));
+	v_setMag(desired, consts.maxspeed);
 
-	float2 steer = v_fromSub(desired, subject.velocity);
-	v_limit(steer, subject.maxforce);
+	float2 steer = v_fromSub(desired, velocity);
+	v_limit(steer, consts.maxforce);
 	return steer;
 }
 
-__device__ float2 avoid_func(Fish &subject, Fish *fish) {
-	float2 steer = { 0.0f, 0.0f };
+__host__ __device__ float2 avoid_func(float2 &location, float2 &velocity, float2 *fish_loc, int *fish_seg, int *seg_start, int *seg_count, constants &consts) {
+#define F_RANGE consts.avoidanceRange
+	float2 steer = make_float2(0.0f, 0.0f);
 	int count = 0;
-	for (int i = 0; i < FISH_COUNT; ++i) {
-		float d = v_dist(subject.location, fish[i].location);
-		if ((d > 0) && (d < d_avoidanceRange)) {
-			// Calculate vector pointing away from neighbor
-			float2 diff(v_fromSub(subject.location, fish[i].location));
-			v_norm(diff);
-			v_div(diff, d);		// Weight by distance
-			v_add(steer, diff);
-			count++;
+	for (int v = getVSeg(location.y - F_RANGE, consts); v <= getVSeg(location.y + F_RANGE, consts); ++v) {
+		for (int j = getIndexFrom(getHSeg(location.x - F_RANGE, consts), v, seg_start); j < getIndexTo(getHSeg(location.x + F_RANGE, consts), v, seg_start, seg_count); ++j) {
+			int i = fish_seg[j];
+			float d = v_dist(location, fish_loc[i]);
+			if ((d > 0) && (d < F_RANGE)) {
+				// Calculate vector pointing away from neighbor
+				float2 diff(v_fromSub(location, fish_loc[i]));
+				v_norm(diff);
+				v_div(diff, d);		// Weight by distance
+				v_add(steer, diff);
+				count++;
+			}
 		}
 	}
 	// Average
@@ -421,149 +310,151 @@ __device__ float2 avoid_func(Fish &subject, Fish *fish) {
 	}
 
 	if (v_mag(steer) > 0) {
-		v_setMag(steer, subject.maxspeed);
-		v_sub(steer, subject.velocity);
-		v_limit(steer, subject.maxforce);
+		v_setMag(steer, consts.maxspeed);
+		v_sub(steer, velocity);
+		v_limit(steer, consts.maxforce);
 	}
 	return steer;
+#undef F_RANGE
 }
 
 // Align == avarage velocity
-__device__ float2 align_func(Fish &subject, Fish *fish) {
+__host__ __device__ float2 align_func(float2 &location, float2 &velocity, float2 *fish_loc, float2 *fish_vel, int *fish_seg, int *seg_start, int *seg_count, constants &consts) {
+#define F_RANGE consts.alignmentRange
 	float2 sum = { 0.0f, 0.0f };
 	int count = 0;
-	for (int i = 0; i < FISH_COUNT; ++i) {
-		float d = v_dist(subject.location, fish[i].location);
-		if ((d > 0) && (d < d_alignmentRange)) {
-			v_add(sum, fish[i].velocity);
-			count++;
+	for (int v = getVSeg(location.y - F_RANGE, consts); v <= getVSeg(location.y + F_RANGE, consts); ++v) {
+		for (int j = getIndexFrom(getHSeg(location.x - F_RANGE, consts), v, seg_start); j < getIndexTo(getHSeg(location.x + F_RANGE, consts), v, seg_start, seg_count); ++j) {
+			int i = fish_seg[j];
+			float d = v_dist(location, fish_loc[i]);
+			if ((d > 0) && (d < F_RANGE)) {
+				v_add(sum, fish_vel[i]);
+				count++;
+			}
 		}
 	}
 	if (count > 0) {
 		v_div(sum, (float)count);
-		v_setMag(sum, subject.maxspeed);
-
-		float2 steer = v_fromSub(sum, subject.velocity);
-		v_limit(steer, subject.maxforce);
+		v_setMag(sum, consts.maxspeed);
+		float2 steer = v_fromSub(sum, velocity);
+		v_limit(steer, consts.maxforce);
 		return steer;
 	}
-	return{ 0.0f, 0.0f };
+	return make_float2(0.0f, 0.0f);
+#undef F_RANGE
 }
 
 // Attraction == avarage location
-__device__ float2 attract_func(Fish &subject, Fish *fish) {
+__host__ __device__ float2 attract_func(float2 &location, float2 &velocity, float2 *fish_loc, int *fish_seg, int *seg_start, int *seg_count, constants &consts) {
+#define F_RANGE consts.attractionRange
 	float2 sum = { 0.0f, 0.0f };
 	int count = 0;
-	for (int i = 0; i < FISH_COUNT; ++i) {
-		float d = v_dist(subject.location, fish[i].location);
-		if ((d > 0) && (d < d_attractionRange)) {
-			v_add(sum, fish[i].location);
-			count++;
+	for (int v = getVSeg(location.y - F_RANGE, consts); v <= getVSeg(location.y + F_RANGE, consts); ++v) {
+		for (int j = getIndexFrom(getHSeg(location.x - F_RANGE, consts), v, seg_start); j < getIndexTo(getHSeg(location.x + F_RANGE, consts), v, seg_start, seg_count); ++j) {
+			int i = fish_seg[j];
+			float d = v_dist(location, fish_loc[i]);
+			if ((d > 0) && (d < F_RANGE)) {
+				v_add(sum, fish_loc[i]);
+				count++;
+			}
 		}
 	}
 	if (count > 0) {
-		v_div(sum, count);
-		return seek_func(subject, sum);
+		v_div(sum, (float)count);
+		return seek_func(location, velocity, sum, consts);
 	}
 	else {
-		return{ 0.0f, 0.0f };
+		return make_float2(0.0f, 0.0f);
 	}
+#undef F_RANGE
 }
 
-__device__ float2 predator_func(Fish &subject, Shark *shark) {
-	float d = v_dist(subject.location, shark->location);
-	if (d > 0 && d < d_predatorRange) {
-		float2 run = v_fromSub(shark->location, subject.location);
+__host__ __device__ float2 predator_func(float2 &location, float2 &shark, constants &consts) {
+#define F_RANGE consts.predatorRange
+	float d = v_dist(location, shark);
+	if (d > 0 && d < F_RANGE) {
+		float2 run = v_fromSub(shark, location);
+		float h = (float)MIN(HEADING(run) + M_PI / 4.0f, HEADING(run) - M_PI / 4.0f);
+		run = make_float2(cosf(h), sinf(h));
 		run *= -1;
 		v_norm(run);
 		v_div(run, d);
 		return run;
 	}
-	return { 0.0f, 0.0f };
+	return make_float2(0.0f, 0.0f);
+#undef F_RANGE
 }
 
-__device__ void flock_func(Fish &subject, Fish *fish, Shark *shark)
+__host__ __device__ void border_wrap_func(float2 &location, constants &consts)
 {
-	subject.acceleration += avoid_func(subject, fish) * 1.5f;
-	subject.acceleration += align_func(subject, fish) * 1.0f;
-	subject.acceleration += attract_func(subject, fish) * 1.0f;
-	subject.acceleration += predator_func(subject, shark) * 0.05f;
+	if (location.x < 0.0f) location.x = consts.width;
+	if (location.y < 0.0f) location.y = consts.height;
+	if (location.x > consts.width) location.x = 0.0f;
+	if (location.y > consts.height) location.y = 0.0f;
 }
 
-__device__ void update_func(Fish &subject, float dt, float2 &acceleration)
+__host__ __device__ void update_func(float2 &location, float2 &velocity, float2 &acceleration, float dt, constants &consts)
 {
-	subject.velocity += acceleration;
-	v_limit(subject.velocity, subject.maxspeed);
-	subject.location += subject.velocity * dt;
+	velocity += acceleration;
+	v_limit(velocity, consts.maxspeed);
+	location += velocity * dt;
 	acceleration *= 0;
+	border_wrap_func(location, consts);
 }
 
-__device__ void borders_func(Fish &subject)
-{
-	if (subject.location.x < 0.0f) subject.location.x = d_width;
-	if (subject.location.y < 0.0f) subject.location.y = d_height;
-	if (subject.location.x > d_width) subject.location.x = 0.0f;
-	if (subject.location.y > d_height) subject.location.y = 0.0f;
-}
-
-__global__ void run_avoid_kernel(Fish *fish, float2 *acceleration)
+__global__ void avoid_kernel(float2 *location, float2 *velocity, float2 *acceleration, int *seg, int *seg_start, int *seg_count)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i > FISH_COUNT) return;
-	acceleration[i] += avoid_func(fish[i], fish) * 1.5f;
+	acceleration[i] += avoid_func(location[i], velocity[i], location, seg, seg_start, seg_count, d_consts) * d_consts.avoidWeight;
 }
 
-__global__ void run_align_kernel(Fish *fish, float2 *acceleration)
+__global__ void align_kernel(float2 *location, float2 *velocity, float2 *acceleration, int *seg, int *seg_start, int *seg_count)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i > FISH_COUNT) return;
-	acceleration[i] += align_func(fish[i], fish) * 1.0f;
+	acceleration[i] += align_func(location[i], velocity[i], location, velocity, seg, seg_start, seg_count, d_consts) * d_consts.alignWeight;
 }
 
-__global__ void run_attract_kernel(Fish *fish, float2 *acceleration)
+__global__ void attract_kernel(float2 *location, float2 *velocity, float2 *acceleration, int *seg, int *seg_start, int *seg_count)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i > FISH_COUNT) return;
-	acceleration[i] += attract_func(fish[i], fish) * 1.0f;
+	acceleration[i] += attract_func(location[i], velocity[i], location, seg, seg_start, seg_count, d_consts) * d_consts.attractWeight;
 }
 
-__global__ void run_predator_kernel(Fish *fish, Shark *shark, float2 *acceleration)
+__global__ void predator_kernel(float2 *location, float2 *acceleration, float2 *shark)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i > FISH_COUNT) return;
-	acceleration[i] += predator_func(fish[i], shark) * 0.05f;
+	acceleration[i] += predator_func(location[i], *shark, d_consts) * d_consts.predatorWeight;
 }
 
-__global__ void run_kernel(GLfloat *pos, Fish *fish, float dt, float2 *acceleration)
+__global__ void update_draw_kernel(GLfloat *vertices, float2 *location, float2 *velocity, float2 *acceleration, float dt)
 {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-
 	if (i > FISH_COUNT) return;
-
-//	flock_func(fish[i], fish, shark);
-	update_func(fish[i], dt, acceleration[i]);
-	borders_func(fish[i]);
-
-    // write output vertex
-	draw_arraw(pos, i, fish[i].location.x, fish[i].location.y, 1.0f, HEADING(fish[i].velocity));
+	update_func(location[i], velocity[i], acceleration[i], dt, d_consts);
+	draw_arraw(vertices, i, location[i].x, location[i].y, 1.0f, HEADING(velocity[i]), d_consts);
 }
 
-
-void launch_kernel(GLfloat *pos, Fish *fish, Shark *shark, float dt, float2 *acceleration)
+void launch_kernel(GLfloat *fish_verts, float2 *fish_loc, float2 *fish_vel, float2 *fish_accel, int *seg, int *seg_start, int *seg_count, float2 *shark, float dt)
 {
     // execute the kernel
-	int blockSize = 512;
+	int blockSize = 256;
 	dim3 threadsInBlock(blockSize);
-	dim3 blocksInGrid(FISH_COUNT / (float)blockSize);
-	run_avoid_kernel <<< blocksInGrid, threadsInBlock, 0, stream[0] >>> (fish, acceleration);
-	run_align_kernel <<< blocksInGrid, threadsInBlock, 0, stream[1] >>> (fish, acceleration);
-	run_attract_kernel <<< blocksInGrid, threadsInBlock, 0, stream[2] >>> (fish, acceleration);
-	run_predator_kernel <<< blocksInGrid, threadsInBlock, 0, stream[3] >>> (fish, shark, acceleration);
+	dim3 blocksInGrid((int)(FISH_COUNT / (float)blockSize));
+	avoid_kernel << < blocksInGrid, threadsInBlock, 0, stream[0] >> >(fish_loc, fish_vel, fish_accel, seg, seg_start, seg_count);
+	CudaCheckError();
+	align_kernel << < blocksInGrid, threadsInBlock, 0, stream[1] >> >(fish_loc, fish_vel, fish_accel, seg, seg_start, seg_count);
+	CudaCheckError();
+	attract_kernel << < blocksInGrid, threadsInBlock, 0, stream[2] >> >(fish_loc, fish_vel, fish_accel, seg, seg_start, seg_count);
+	CudaCheckError();
+	predator_kernel << < blocksInGrid, threadsInBlock, 0, stream[3] >> >(fish_loc, fish_accel, shark);
+	CudaCheckError();
 	checkCudaErrors(cudaDeviceSynchronize());
-	run_kernel <<< blocksInGrid, threadsInBlock >>>(pos, fish, dt, acceleration);
-	cudaError res = cudaGetLastError();
-	if ( cudaSuccess != res )
-	    printf( "Error: %s!\n", cudaGetErrorName(res));
+	update_draw_kernel << < blocksInGrid, threadsInBlock >> >(fish_verts, fish_loc, fish_vel, fish_accel, dt);
+	CudaCheckError();
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -580,60 +471,60 @@ bool checkHW(char *name, const char *gpuType, int dev)
     }
 }
 
-int findGraphicsGPU(char *name)
-{
-    int nGraphicsGPU = 0;
-    int deviceCount = 0;
-    bool bFoundGraphics = false;
-    char firstGraphicsName[256], temp[256];
-
-    cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
-
-    if (error_id != cudaSuccess)
-    {
-        printf("cudaGetDeviceCount returned %d\n-> %s\n", (int)error_id, cudaGetErrorString(error_id));
-        printf("> FAILED %s sample finished, exiting...\n", sSDKsample);
-        exit(EXIT_FAILURE);
-    }
-
-    // This function call returns 0 if there are no CUDA capable devices.
-    if (deviceCount == 0)
-    {
-        printf("> There are no device(s) supporting CUDA\n");
-        return false;
-    }
-    else
-    {
-        printf("> Found %d CUDA Capable Device(s)\n", deviceCount);
-    }
-
-    for (int dev = 0; dev < deviceCount; ++dev)
-    {
-        bool bGraphics = !checkHW(temp, (const char *)"Tesla", dev);
-        printf("> %s\t\tGPU %d: %s\n", (bGraphics ? "Graphics" : "Compute"), dev, temp);
-
-        if (bGraphics)
-        {
-            if (!bFoundGraphics)
-            {
-                strcpy(firstGraphicsName, temp);
-            }
-
-            nGraphicsGPU++;
-        }
-    }
-
-    if (nGraphicsGPU)
-    {
-        strcpy(name, firstGraphicsName);
-    }
-    else
-    {
-        strcpy(name, "this hardware");
-    }
-
-    return nGraphicsGPU;
-}
+//int findGraphicsGPU(char *name)
+//{
+//    int nGraphicsGPU = 0;
+//    int deviceCount = 0;
+//    bool bFoundGraphics = false;
+//    char firstGraphicsName[256], temp[256];
+//
+//    cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
+//
+//    if (error_id != cudaSuccess)
+//    {
+//        printf("cudaGetDeviceCount returned %d\n-> %s\n", (int)error_id, cudaGetErrorString(error_id));
+//        printf("> FAILED %s sample finished, exiting...\n", sProgramName);
+//        exit(EXIT_FAILURE);
+//    }
+//
+//    // This function call returns 0 if there are no CUDA capable devices.
+//    if (deviceCount == 0)
+//    {
+//        printf("> There are no device(s) supporting CUDA\n");
+//        return false;
+//    }
+//    else
+//    {
+//        printf("> Found %d CUDA Capable Device(s)\n", deviceCount);
+//    }
+//
+//    for (int dev = 0; dev < deviceCount; ++dev)
+//    {
+//        bool bGraphics = !checkHW(temp, (const char *)"Tesla", dev);
+//        printf("> %s\t\tGPU %d: %s\n", (bGraphics ? "Graphics" : "Compute"), dev, temp);
+//
+//        if (bGraphics)
+//        {
+//            if (!bFoundGraphics)
+//            {
+//                strcpy(firstGraphicsName, temp);
+//            }
+//
+//            nGraphicsGPU++;
+//        }
+//    }
+//
+//    if (nGraphicsGPU)
+//    {
+//        strcpy(name, firstGraphicsName);
+//    }
+//    else
+//    {
+//        strcpy(name, "this hardware");
+//    }
+//
+//    return nGraphicsGPU;
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
@@ -647,13 +538,13 @@ int main(int argc, char **argv)
 	setenv("DISPLAY", ":0", 0);
 #endif
 
-	printf("%s starting...\n", sSDKsample);
+	printf("%s starting...\n", sProgramName);
 
 	printf("\n");
 
 	run(argc, argv);
 
-	printf("%s completed, returned %s\n", sSDKsample, (g_TotalErrors == 0) ? "OK" : "ERROR!");
+	printf("%s completed, returned %s\n", sProgramName, (g_TotalErrors == 0) ? "OK" : "ERROR!");
 	exit(g_TotalErrors == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -686,10 +577,17 @@ bool initGL(int *argc, char **argv)
 	glutInitWindowSize(window_width, window_height);
 	glutCreateWindow("Cuda GL Interop (VBO)");
 	glutDisplayFunc(display);
+	glutReshapeFunc(reshape);
 	glutKeyboardFunc(keyboard);
+	glutMouseFunc(mouse);
 	glutMotionFunc(motion);
 	glutPassiveMotionFunc(passivemotion);
 	glutTimerFunc(REFRESH_DELAY, timerEvent, 0);
+#if defined (__APPLE__) || defined(MACOSX)
+	atexit(cleanup);
+#else
+	glutCloseFunc(cleanup);
+#endif
 
 	// initialize necessary OpenGL extensions
 	glewInit();
@@ -712,7 +610,7 @@ bool initGL(int *argc, char **argv)
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 	//gluPerspective(60.0, (GLfloat)window_width / (GLfloat) window_height, 0.1, 10.0);
-	glOrtho(0.0, width, 0.0, height, 0.1, 10.0);
+	glOrtho(0.0, h_consts.width, 0.0, h_consts.height, 0.1, 10.0);
 
 	SDK_CHECK_ERROR_GL();
 
@@ -725,6 +623,8 @@ bool initGL(int *argc, char **argv)
 ////////////////////////////////////////////////////////////////////////////////
 bool run(int argc, char **argv/*, char *ref_file*/)
 {
+	set_consts();
+
 	// Create the CUTIL timer
 	sdkCreateTimer(&timer);
 
@@ -735,50 +635,65 @@ bool run(int argc, char **argv/*, char *ref_file*/)
 		return false;
 	}
 
-	// use command-line specified CUDA device, otherwise use device with highest Gflops/s
-	if (checkCmdLineFlag(argc, (const char **)argv, "device"))
-	{
-		if (gpuGLDeviceInit(argc, (const char **)argv) == -1)
+	if (RUN_CUDA) {
+		// use command-line specified CUDA device, otherwise use device with highest Gflops/s
+		if (checkCmdLineFlag(argc, (const char **)argv, "device"))
 		{
-			return false;
+			if (gpuGLDeviceInit(argc, (const char **)argv) == -1)
+			{
+				return false;
+			}
+		}
+		else
+		{
+			cudaGLSetGLDevice(gpuGetMaxGflopsDeviceId());
 		}
 	}
-	else
-	{
-		cudaGLSetGLDevice(gpuGetMaxGflopsDeviceId());
-	}
-
-	// register callbacks
-	glutDisplayFunc(display);
-	glutKeyboardFunc(keyboard);
-	glutMouseFunc(mouse);
-	glutMotionFunc(motion);
-	glutPassiveMotionFunc(passivemotion);
-#if defined (__APPLE__) || defined(MACOSX)
-	atexit(cleanup);
-#else
-	glutCloseFunc(cleanup);
-#endif
 
 	// create VBO
 	createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
 
-	for (int i = 0; i < 4; ++i)
-		checkCudaErrors(cudaStreamCreate(&stream[i]));
+	srand((unsigned int)time(NULL));
 
-	// copy fish & shark to device memory
-	int size = FISH_COUNT * sizeof(Fish);
-	checkCudaErrors(cudaMalloc((void **) &d_fish, size));
-	checkCudaErrors(cudaMemcpy(d_fish, &fish, size, cudaMemcpyHostToDevice));
+	for (int i = 0; i < FISH_COUNT; ++i) {
+		randFish(i);
+	}
+	sortFish(h_consts);
 
-	checkCudaErrors(cudaMalloc((void **)&d_shark, sizeof(Shark)));
-	checkCudaErrors(cudaMemcpy(d_shark, &shark, sizeof(Shark), cudaMemcpyHostToDevice));
+	if (RUN_CUDA) {
+		for (int i = 0; i < 4; ++i)
+			checkCudaErrors(cudaStreamCreate(&stream[i]));
 
-	checkCudaErrors(cudaMalloc((void **)&d_acceleration, FISH_COUNT * sizeof(float2)));
+		// copy fish & shark to device memory
+		int size = FISH_COUNT * sizeof(float2);
+		checkCudaErrors(cudaMalloc((void **) &d_fish_loc, size));
+		checkCudaErrors(cudaMemcpy(d_fish_loc, &fish_loc, size, cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaMalloc((void **) &d_fish_vel, size));
+		checkCudaErrors(cudaMemcpy(d_fish_vel, &fish_vel, size, cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaMalloc((void **) &d_fish_accel, size));
+		checkCudaErrors(cudaMemcpy(d_fish_accel, &fish_accel, size, cudaMemcpyHostToDevice));
+
+		size = FISH_COUNT * sizeof(int);
+		checkCudaErrors(cudaMalloc((void **) &d_seg, size));
+		checkCudaErrors(cudaMemcpy(d_seg, &fish_seg, size, cudaMemcpyHostToDevice));
+
+		size = H_SEGMENTS * V_SEGMENTS * sizeof(int);
+		checkCudaErrors(cudaMalloc((void **) &d_seg_start, size));
+		checkCudaErrors(cudaMemcpy(d_seg_start, &seg_start, size, cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaMalloc((void **) &d_seg_count, size));
+		checkCudaErrors(cudaMemcpy(d_seg_count, &seg_count, size, cudaMemcpyHostToDevice));
+
+		checkCudaErrors(cudaMalloc((void **)&d_shark, sizeof(float2)));
+		checkCudaErrors(cudaMemcpy(d_shark, &shark, sizeof(float2), cudaMemcpyHostToDevice));
+
+		checkCudaErrors(cudaMemcpyToSymbol(d_consts, &h_consts, sizeof(constants)));
+	}
 
 	// run the cuda part
-	runCuda(&cuda_vbo_resource, d_fish, d_shark);
-	//runCPU();
+	if (RUN_CUDA)
+		runCuda();
+	else
+		runCPU();
 
 	// start rendering mainloop
 	glutMainLoop();
@@ -789,49 +704,62 @@ bool run(int argc, char **argv/*, char *ref_file*/)
 ////////////////////////////////////////////////////////////////////////////////
 //! Run the Cuda part of the computation
 ////////////////////////////////////////////////////////////////////////////////
-void runCuda(struct cudaGraphicsResource **vbo_resource, struct Fish *d_fish, struct Shark *d_shark)
+void runCuda()
 {
     // map OpenGL buffer object for writing from CUDA
     GLfloat *dptr;
-    checkCudaErrors(cudaGraphicsMapResources(1, vbo_resource, 0));
+    checkCudaErrors(cudaGraphicsMapResources(1, &cuda_vbo_resource, 0));
     size_t num_bytes;
-    checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void **)&dptr, &num_bytes, *vbo_resource));
+    checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void **)&dptr, &num_bytes, cuda_vbo_resource));
     //printf("CUDA mapped VBO: May access %ld bytes\n", num_bytes);
 
-	checkCudaErrors(cudaMemcpy(d_shark, &shark, sizeof(Shark), cudaMemcpyHostToDevice));
-	checkCudaErrors(cudaMemset(d_acceleration, 0, FISH_COUNT * sizeof(float2)));
+	checkCudaErrors(cudaMemcpy(d_shark, &shark, sizeof(float2), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemset(d_fish_accel, 0, FISH_COUNT * sizeof(float2)));
+
+	checkCudaErrors(cudaMemcpy(d_seg, fish_seg, FISH_COUNT * sizeof(int), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_seg_start, seg_start, H_SEGMENTS * V_SEGMENTS * sizeof(int), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_seg_count, seg_count, H_SEGMENTS * V_SEGMENTS * sizeof(int), cudaMemcpyHostToDevice));
 
 	float dt = 0.013f;
 
-	launch_kernel(dptr, d_fish, d_shark, dt, d_acceleration);
+	launch_kernel(dptr, d_fish_loc, d_fish_vel, d_fish_accel, d_seg, d_seg_start, d_seg_count, d_shark, dt);
+
+	checkCudaErrors(cudaMemcpy(fish_loc, d_fish_loc, FISH_COUNT * sizeof(float2), cudaMemcpyDeviceToHost));
+
+	sortFish(h_consts);
 
     // unmap buffer object
-    checkCudaErrors(cudaGraphicsUnmapResources(1, vbo_resource, 0));
+    checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0));
 }
 
 void runCPU()
 {
 	unsigned int size = FISH_COUNT * VERTS_IN_FISH * 4 * sizeof(float);
-	GLfloat *pos = (GLfloat*)malloc(size);
+	GLfloat *fish_verts = (GLfloat*)malloc(size);
 
 	float dt = 0.013f;
 
-	// Compute headings
+	// Compute
 	for (int i = 0; i < FISH_COUNT; ++i) {
-		fish[i].run(fish, &shark, dt);
+		fish_accel[i] += avoid_func(fish_loc[i], fish_vel[i], fish_loc, fish_seg, seg_start, seg_count, h_consts) * h_consts.avoidWeight;
+		fish_accel[i] += align_func(fish_loc[i], fish_vel[i], fish_loc, fish_vel, fish_seg, seg_start, seg_count, h_consts) * h_consts.alignWeight;
+		fish_accel[i] += attract_func(fish_loc[i], fish_vel[i], fish_loc, fish_seg, seg_start, seg_count, h_consts) * h_consts.attractWeight;
+		fish_accel[i] += predator_func(fish_loc[i], shark, h_consts) * h_consts.predatorWeight;
 	}
 
-	// Draw
 	for (int i = 0; i < FISH_COUNT; ++i) {
-		drawArraw(pos, i, fish[i].location.x, fish[i].location.y, 0.0f, v_heading(fish[i].velocity));
+		update_func(fish_loc[i], fish_vel[i], fish_accel[i], dt, h_consts);
+		draw_arraw(fish_verts, i, fish_loc[i].x, fish_loc[i].y, 1.0f, HEADING(fish_vel[i]), h_consts);
 	}
+
+	sortFish(h_consts);
 
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, size, pos, GL_DYNAMIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, size, fish_verts, GL_DYNAMIC_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-	free(pos);
+	free(fish_verts);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -851,8 +779,10 @@ void createVBO(GLuint *vbo, struct cudaGraphicsResource **vbo_res, unsigned int 
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-	// register this buffer object with CUDA
-	checkCudaErrors(cudaGraphicsGLRegisterBuffer(vbo_res, *vbo, vbo_res_flags));
+	if (RUN_CUDA) {
+		// register this buffer object with CUDA
+		checkCudaErrors(cudaGraphicsGLRegisterBuffer(vbo_res, *vbo, vbo_res_flags));
+	}
 
 	SDK_CHECK_ERROR_GL();
 }
@@ -862,9 +792,10 @@ void createVBO(GLuint *vbo, struct cudaGraphicsResource **vbo_res, unsigned int 
 ////////////////////////////////////////////////////////////////////////////////
 void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res)
 {
-
-	// unregister this buffer object with CUDA
-	checkCudaErrors(cudaGraphicsUnregisterResource(vbo_res));
+	if (RUN_CUDA) {
+		// unregister this buffer object with CUDA
+		checkCudaErrors(cudaGraphicsUnregisterResource(vbo_res));
+	}
 
 	glBindBuffer(1, *vbo);
 	glDeleteBuffers(1, vbo);
@@ -880,17 +811,36 @@ void display()
 	sdkStartTimer(&timer);
 
 	// run CUDA kernel to generate vertex positions
-	runCuda(&cuda_vbo_resource, d_fish, d_shark);
-	//runCPU();
+	if (RUN_CUDA)
+		runCuda();
+	else
+		runCPU();
 
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	glColor3f(0.0f, 0.0f, 1.0f);
+	glBegin(GL_LINES);
+	for (int i = 1; i < H_SEGMENTS; ++i) {
+		glVertex2f(i * h_consts.width / (float)H_SEGMENTS, 0.0f);
+		glVertex2f(i * h_consts.width / (float)H_SEGMENTS, h_consts.height);
+	}
+	for (int i = 1; i < V_SEGMENTS; ++i) {
+		glVertex2f(0.0f, i * h_consts.height / (float)V_SEGMENTS);
+		glVertex2f(h_consts.width, i * h_consts.height / (float)V_SEGMENTS);
+	}
+	glEnd();
+
+	glColor3f(0.0f, 1.0f, 0.0f);
+	drawCircle(fish_loc[0].x, fish_loc[0].y, h_consts.avoidanceRange, 30);
+	drawCircle(fish_loc[0].x, fish_loc[0].y, h_consts.alignmentRange, 30);
+	drawCircle(fish_loc[0].x, fish_loc[0].y, h_consts.attractionRange, 30);
 
 	// set view matrix
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 	glTranslatef(0.0, 0.0, translate_z);
-	glRotatef(rotate_x, 1.0, 0.0, 0.0);
-	glRotatef(rotate_y, 0.0, 1.0, 0.0);
+//	glRotatef(rotate_x, 1.0, 0.0, 0.0);
+//	glRotatef(rotate_y, 0.0, 1.0, 0.0);
 
 	// render from the vbo
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -902,12 +852,19 @@ void display()
 	glDisableClientState(GL_VERTEX_ARRAY);
 
 	glColor3f(0.0f, 1.0f, 0.0f);
-	drawCircle(shark.location.x, shark.location.y, predatorRange, 30);
+	drawCircle(shark.x, shark.y, h_consts.predatorRange, 30);
 
 	glutSwapBuffers();
 
 	sdkStopTimer(&timer);
 	computeFPS();
+}
+
+void reshape(int width, int height)
+{
+	window_width = width;
+	window_height = height;
+	glViewport(0, 0, window_width, window_height);
 }
 
 void timerEvent(int value)
@@ -928,15 +885,25 @@ void cleanup()
 		deleteVBO(&vbo, cuda_vbo_resource);
 	}
 
-	for (int i = 0; i < 4; ++i)
-		checkCudaErrors(cudaStreamDestroy(stream[i]));
+	if (RUN_CUDA) {
+		for (int i = 0; i < 4; ++i)
+			checkCudaErrors(cudaStreamDestroy(stream[i]));
 
-	// cudaDeviceReset causes the driver to clean up all state. While
-	// not mandatory in normal operation, it is good practice.  It is also
-	// needed to ensure correct operation when the application is being
-	// profiled. Calling cudaDeviceReset causes all profile data to be
-	// flushed before the application exits
-	cudaDeviceReset();
+		checkCudaErrors(cudaFree(d_fish_loc));
+		checkCudaErrors(cudaFree(d_fish_vel));
+		checkCudaErrors(cudaFree(d_fish_accel));
+		checkCudaErrors(cudaFree(d_seg));
+		checkCudaErrors(cudaFree(d_seg_start));
+		checkCudaErrors(cudaFree(d_seg_count));
+		checkCudaErrors(cudaFree(d_shark));
+
+		// cudaDeviceReset causes the driver to clean up all state. While
+		// not mandatory in normal operation, it is good practice.  It is also
+		// needed to ensure correct operation when the application is being
+		// profiled. Calling cudaDeviceReset causes all profile data to be
+		// flushed before the application exits
+		cudaDeviceReset();
+	}
 }
 
 
@@ -997,13 +964,13 @@ void motion(int x, int y)
 
 void passivemotion(int x, int y)
 {
-	shark.location.x = width * x / (float)window_width;
-	shark.location.y = height - height * y / (float)window_height;
+	shark.x = h_consts.width * x / (float)window_width;
+	shark.y = h_consts.height - h_consts.height * y / (float)window_height;
 }
 
 inline void drawCircle(float cx, float cy, float r, int num_segments)
 {
-	float theta = 2 * 3.1415926 / float(num_segments);
+	float theta = (float) (2 * M_PI / (float)num_segments);
 	float c = cosf(theta); // precalculate the sine and cosine
 	float s = sinf(theta);
 	float t;
@@ -1023,21 +990,36 @@ inline void drawCircle(float cx, float cy, float r, int num_segments)
 	glEnd();
 }
 
-void drawArraw(GLfloat *array, int index, float u, float w, float v, float heading)
+void randFish(int i)
 {
-	//	float peakWidth = 0.02f;
-	float peakHeight = 0.02f * scale;
-	float trunkWidth = 0.005f * scale;
-	//	float trunkHeight = 0.03f;
-	VERT_ARRAY_TRIANGLE(array, index,
-		ROTATE_POINT_X(u, w - trunkWidth, u, w, heading),
-		ROTATE_POINT_Y(u, w - trunkWidth, u, w, heading),
-		v,
-		ROTATE_POINT_X(u + peakHeight, w, u, w, heading),
-		ROTATE_POINT_Y(u + peakHeight, w, u, w, heading),
-		v,
-		ROTATE_POINT_X(u, w + trunkWidth, u, w, heading),
-		ROTATE_POINT_Y(u, w + trunkWidth, u, w, heading),
-		v
-		);
+	float2 random = randomUnit();
+	fish_loc[i] = make_float2(h_consts.width * (rand() / (float)RAND_MAX), h_consts.height * (rand() / (float)RAND_MAX));
+//	fish_loc[i] = make_float2(0.5f * width, 0.5f * height);
+	random = randomUnit();
+	v_setMag(random, h_consts.maxspeed);
+	fish_vel[i] = make_float2(random.x, random.y);
+}
+
+void sortFish(constants &consts)
+{
+	// Init
+	int seg_last[H_SEGMENTS * V_SEGMENTS];
+	for (int i = 0; i < H_SEGMENTS * V_SEGMENTS; ++i) {
+		seg_count[i] = 0;
+	}
+	// Set each segment fish count
+	for (int i = 0; i < FISH_COUNT; ++i) {
+		++seg_count[getSeg(fish_loc[i], consts)];
+	}
+	// Set segment start indexes
+	int start = 0;
+	for (int i = 0; i < H_SEGMENTS * V_SEGMENTS; ++i) {
+		seg_start[i] = start;
+		seg_last[i] = start;
+		start += seg_count[i];
+	}
+	// Sort fish by segment in index array
+	for (int i = 0; i < FISH_COUNT; ++i) {
+		fish_seg[seg_last[getSeg(fish_loc[i], consts)]++] = i;
+	}
 }
